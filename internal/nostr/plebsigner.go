@@ -118,7 +118,8 @@ func (c *PlebSignerClient) SignEvent(event *nostr.Event, keyID string) error {
 	}
 
 	// Debug: log the raw response
-	fmt.Printf("DEBUG: Pleb_Signer response: %s\n", result)
+	// Don't log the full response - it's working fine
+	// fmt.Printf("DEBUG: Pleb_Signer response: %s\n", result)
 
 	// Check for error response
 	var errorResp struct {
