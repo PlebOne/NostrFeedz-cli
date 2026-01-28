@@ -16,12 +16,18 @@ const (
 )
 
 type SubscriptionList struct {
-	RSS         []string            `json:"rss"`
-	Nostr       []string            `json:"nostr"`
-	Tags        map[string][]string `json:"tags"`
-	Categories  map[string]string   `json:"categories"` // URL/npub -> category name
-	Deleted     []string            `json:"deleted"`
-	LastUpdated int64               `json:"lastUpdated"`
+	RSS         []string                       `json:"rss"`
+	Nostr       []string                       `json:"nostr"`
+	Tags        map[string][]string            `json:"tags"`
+	Categories  map[string]CategoryInfo        `json:"categories"` // URL/npub -> category info
+	Deleted     []string                       `json:"deleted"`
+	LastUpdated int64                          `json:"lastUpdated"`
+}
+
+type CategoryInfo struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+	Icon  string `json:"icon"`
 }
 
 type ReadStatusList struct {
@@ -145,7 +151,7 @@ func MergeSubscriptions(local, remote *SubscriptionList) *SubscriptionList {
 
 	merged := &SubscriptionList{
 		Tags:        make(map[string][]string),
-		Categories:  make(map[string]string),
+		Categories:  make(map[string]CategoryInfo),
 		LastUpdated: max(local.LastUpdated, remote.LastUpdated),
 	}
 

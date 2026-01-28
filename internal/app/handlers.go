@@ -470,19 +470,21 @@ func (m *Model) syncFromNostr() tea.Cmd {
 
 		// 4. Import categories from Nostr
 		if len(subs.Categories) > 0 {
-			for feedURL, categoryName := range subs.Categories {
+			for feedURL, catInfo := range subs.Categories {
 				feed, err := m.db.GetFeedByURL(feedURL)
 				if err == nil && feed != nil {
 					// Get or create category
-					category, err := m.db.GetCategoryByName(categoryName)
+					category, err := m.db.GetCategoryByName(catInfo.Name)
 					if err != nil || category == nil {
-						// Create new category
+						// Create new category with full info from Nostr
 						category = &db.Category{
-							ID:   fmt.Sprintf("cat_%s", categoryName),
-							Name: categoryName,
+							ID:    fmt.Sprintf("cat_%s", catInfo.Name),
+							Name:  catInfo.Name,
+							Color: catInfo.Color,
+							Icon:  catInfo.Icon,
 						}
 						if err := m.db.CreateCategory(category); err != nil {
-							fmt.Printf("Warning: failed to create category %s: %v\n", categoryName, err)
+							fmt.Printf("Warning: failed to create category %s: %v\n", catInfo.Name, err)
 							continue
 						}
 					}
