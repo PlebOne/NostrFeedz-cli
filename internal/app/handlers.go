@@ -91,20 +91,83 @@ func (m *Model) updateAuth(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateFeeds(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "tab":
+		// Toggle between view modes
+		m.viewMode = (m.viewMode + 1) % 3
+		m.selectedFeedIdx = 0
+		m.selectedTagIdx = 0
+		m.selectedCategoryIdx = 0
+		
+		// Load data for new view mode
+		switch m.viewMode {
+		case ViewModeFeeds:
+			return m, m.loadFeeds()
+		case ViewModeTags:
+			return m, m.loadTags()
+		case ViewModeCategories:
+			return m, m.loadCategories()
+		}
+		
 	case "up", "k":
-		if m.selectedFeedIdx > 0 {
-			m.selectedFeedIdx--
+		switch m.viewMode {
+		case ViewModeFeeds:
+			if m.selectedFeedIdx > 0 {
+				m.selectedFeedIdx--
+			}
+		case ViewModeTags:
+			if m.selectedTagIdx > 0 {
+				m.selectedTagIdx--
+			}
+		case ViewModeCategories:
+			if m.selectedCategoryIdx > 0 {
+				m.selectedCategoryIdx--
+			}
 		}
+		
 	case "down", "j":
-		if m.selectedFeedIdx < len(m.feeds)-1 {
-			m.selectedFeedIdx++
+		switch m.viewMode {
+		case ViewModeFeeds:
+			if m.selectedFeedIdx < len(m.feeds)-1 {
+				m.selectedFeedIdx++
+			}
+		case ViewModeTags:
+			if m.selectedTagIdx < len(m.tags)-1 {
+				m.selectedTagIdx++
+			}
+		case ViewModeCategories:
+			if m.selectedCategoryIdx < len(m.categories)-1 {
+				m.selectedCategoryIdx++
+			}
 		}
+		
 	case "enter":
-		if m.selectedFeedIdx < len(m.feeds) {
-			m.currentFeed = &m.feeds[m.selectedFeedIdx]
-			m.currentView = ArticlesView
-			// TODO: Load articles for this feed
+		switch m.viewMode {
+		case ViewModeFeeds:
+			if m.selectedFeedIdx < len(m.feeds) {
+				m.currentFeed = &m.feeds[m.selectedFeedIdx]
+				m.currentView = ArticlesView
+				// TODO: Load articles for this feed
+			}
+		case ViewModeTags:
+			if m.selectedTagIdx < len(m.tags) {
+				m.currentTag = &m.tags[m.selectedTagIdx]
+				m.currentView = ArticlesView
+				// Load feeds for this tag and show articles
+				return m, m.loadFeedsForTag(m.currentTag.ID)
+			}
+		case ViewModeCategories:
+			if m.selectedCategoryIdx < len(m.categories) {
+				m.currentCategory = &m.categories[m.selectedCategoryIdx]
+				m.currentView = ArticlesView
+				// Load feeds for this category and show articles
+				return m, m.loadFeedsForCategory(m.currentCategory.ID)
+			}
 		}
+		
+	case "s":
+		// Manual sync
+		m.statusMessage = "Syncing from Nostr..."
+		return m, m.syncFromNostr()
 	}
 	return m, nil
 }
@@ -247,6 +310,51 @@ func (m *Model) loadFeeds() tea.Cmd {
 	}
 }
 
+type tagsLoadedMsg []db.Tag
+type categoriesLoadedMsg []db.Category
+type feedsForTagLoadedMsg []db.Feed
+type feedsForCategoryLoadedMsg []db.Feed
+
+func (m *Model) loadTags() tea.Cmd {
+	return func() tea.Msg {
+		tags, err := m.db.GetTags()
+		if err != nil {
+			return errMsg(err)
+		}
+		return tagsLoadedMsg(tags)
+	}
+}
+
+func (m *Model) loadCategories() tea.Cmd {
+	return func() tea.Msg {
+		categories, err := m.db.GetCategories()
+		if err != nil {
+			return errMsg(err)
+		}
+		return categoriesLoadedMsg(categories)
+	}
+}
+
+func (m *Model) loadFeedsForTag(tagID string) tea.Cmd {
+	return func() tea.Msg {
+		feeds, err := m.db.GetFeedsByTag(tagID)
+		if err != nil {
+			return errMsg(err)
+		}
+		return feedsForTagLoadedMsg(feeds)
+	}
+}
+
+func (m *Model) loadFeedsForCategory(categoryID string) tea.Cmd {
+	return func() tea.Msg {
+		feeds, err := m.db.GetFeedsByCategory(categoryID)
+		if err != nil {
+			return errMsg(err)
+		}
+		return feedsForCategoryLoadedMsg(feeds)
+	}
+}
+
 func (m *Model) syncFromNostr() tea.Cmd {
 	return func() tea.Msg {
 		if m.nostr == nil {
@@ -360,7 +468,34 @@ func (m *Model) syncFromNostr() tea.Cmd {
 			}
 		}
 
-		// 4. Fetch read status from Nostr (kind 30405)
+		// 4. Import categories from Nostr
+		if len(subs.Categories) > 0 {
+			for feedURL, categoryName := range subs.Categories {
+				feed, err := m.db.GetFeedByURL(feedURL)
+				if err == nil && feed != nil {
+					// Get or create category
+					category, err := m.db.GetCategoryByName(categoryName)
+					if err != nil || category == nil {
+						// Create new category
+						category = &db.Category{
+							ID:   fmt.Sprintf("cat_%s", categoryName),
+							Name: categoryName,
+						}
+						if err := m.db.CreateCategory(category); err != nil {
+							fmt.Printf("Warning: failed to create category %s: %v\n", categoryName, err)
+							continue
+						}
+					}
+					// Update feed's category
+					feed.CategoryID = category.ID
+					if err := m.db.UpdateFeed(feed); err != nil {
+						fmt.Printf("Warning: failed to update feed category: %v\n", err)
+					}
+				}
+			}
+		}
+
+		// 5. Fetch read status from Nostr (kind 30405)
 		readStatus, err := m.nostr.FetchReadStatus(pubkey)
 		if err != nil {
 			// Don't fail the whole sync if read status fails

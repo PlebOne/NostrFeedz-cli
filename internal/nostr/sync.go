@@ -19,6 +19,7 @@ type SubscriptionList struct {
 	RSS         []string            `json:"rss"`
 	Nostr       []string            `json:"nostr"`
 	Tags        map[string][]string `json:"tags"`
+	Categories  map[string]string   `json:"categories"` // URL/npub -> category name
 	Deleted     []string            `json:"deleted"`
 	LastUpdated int64               `json:"lastUpdated"`
 }
@@ -144,6 +145,7 @@ func MergeSubscriptions(local, remote *SubscriptionList) *SubscriptionList {
 
 	merged := &SubscriptionList{
 		Tags:        make(map[string][]string),
+		Categories:  make(map[string]string),
 		LastUpdated: max(local.LastUpdated, remote.LastUpdated),
 	}
 
@@ -192,6 +194,14 @@ func MergeSubscriptions(local, remote *SubscriptionList) *SubscriptionList {
 		} else {
 			merged.Tags[key] = tags
 		}
+	}
+
+	// Merge categories (remote wins on conflicts)
+	for key, cat := range local.Categories {
+		merged.Categories[key] = cat
+	}
+	for key, cat := range remote.Categories {
+		merged.Categories[key] = cat
 	}
 
 	// Merge deleted feeds

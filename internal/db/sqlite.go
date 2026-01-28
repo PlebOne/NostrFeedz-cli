@@ -347,3 +347,103 @@ tags = append(tags, tag)
 }
 return tags, rows.Err()
 }
+
+// Category methods
+func (db *DB) CreateCategory(category *Category) error {
+_, err := db.conn.Exec(`
+INSERT INTO categories (id, name, color, icon, sort_order)
+VALUES (?, ?, ?, ?, ?)
+`, category.ID, category.Name, category.Color, category.Icon, category.SortOrder)
+return err
+}
+
+func (db *DB) GetCategories() ([]Category, error) {
+rows, err := db.conn.Query(`
+SELECT id, name, COALESCE(color, ''), COALESCE(icon, ''), sort_order
+FROM categories
+ORDER BY sort_order, name
+`)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var categories []Category
+for rows.Next() {
+var cat Category
+if err := rows.Scan(&cat.ID, &cat.Name, &cat.Color, &cat.Icon, &cat.SortOrder); err != nil {
+return nil, err
+}
+categories = append(categories, cat)
+}
+return categories, rows.Err()
+}
+
+func (db *DB) GetCategoryByName(name string) (*Category, error) {
+var cat Category
+err := db.conn.QueryRow(`
+SELECT id, name, COALESCE(color, ''), COALESCE(icon, ''), sort_order
+FROM categories
+WHERE name = ?
+`, name).Scan(&cat.ID, &cat.Name, &cat.Color, &cat.Icon, &cat.SortOrder)
+
+if err != nil {
+return nil, err
+}
+return &cat, nil
+}
+
+func (db *DB) GetFeedsByCategory(categoryID string) ([]Feed, error) {
+rows, err := db.conn.Query(`
+SELECT id, type, COALESCE(url, ''), COALESCE(npub, ''), title, 
+       COALESCE(description, ''), COALESCE(category_id, ''), created_at
+FROM feeds
+WHERE category_id = ?
+ORDER BY title
+`, categoryID)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var feeds []Feed
+for rows.Next() {
+var feed Feed
+var createdAt int64
+if err := rows.Scan(&feed.ID, &feed.Type, &feed.URL, &feed.NPUB, &feed.Title,
+&feed.Description, &feed.CategoryID, &createdAt); err != nil {
+return nil, err
+}
+feed.CreatedAt = time.Unix(createdAt, 0)
+feeds = append(feeds, feed)
+}
+return feeds, rows.Err()
+}
+
+func (db *DB) GetFeedsByTag(tagID string) ([]Feed, error) {
+rows, err := db.conn.Query(`
+SELECT f.id, f.type, COALESCE(f.url, ''), COALESCE(f.npub, ''), f.title,
+       COALESCE(f.description, ''), COALESCE(f.category_id, ''), f.created_at
+FROM feeds f
+JOIN feed_tags ft ON f.id = ft.feed_id
+WHERE ft.tag_id = ?
+ORDER BY f.title
+`, tagID)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var feeds []Feed
+for rows.Next() {
+var feed Feed
+var createdAt int64
+if err := rows.Scan(&feed.ID, &feed.Type, &feed.URL, &feed.NPUB, &feed.Title,
+&feed.Description, &feed.CategoryID, &createdAt); err != nil {
+return nil, err
+}
+feed.CreatedAt = time.Unix(createdAt, 0)
+feeds = append(feeds, feed)
+}
+return feeds, rows.Err()
+}

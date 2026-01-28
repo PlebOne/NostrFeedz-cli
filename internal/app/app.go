@@ -21,6 +21,14 @@ const (
 	ReaderView
 )
 
+type ViewMode int
+
+const (
+	ViewModeFeeds ViewMode = iota
+	ViewModeTags
+	ViewModeCategories
+)
+
 type AuthState int
 
 const (
@@ -39,6 +47,7 @@ type Model struct {
 	nostr  *nostr.Client
 	
 	currentView View
+	viewMode    ViewMode
 	authState   AuthState
 	
 	// Authentication
@@ -48,8 +57,12 @@ type Model struct {
 	
 	// Data
 	feeds           []db.Feed
+	tags            []db.Tag
+	categories      []db.Category
 	articles        []db.FeedItem
 	currentFeed     *db.Feed
+	currentTag      *db.Tag
+	currentCategory *db.Category
 	currentArticle  *db.FeedItem
 	
 	// UI State
@@ -58,6 +71,8 @@ type Model struct {
 	feedListWidth   int
 	articleListWidth int
 	selectedFeedIdx int
+	selectedTagIdx  int
+	selectedCategoryIdx int
 	selectedArticleIdx int
 	err             error
 	statusMessage   string
@@ -68,10 +83,13 @@ func New(cfg *config.Config, database *db.DB) *Model {
 		cfg:              cfg,
 		db:               database,
 		currentView:      AuthView,
+		viewMode:         ViewModeFeeds,
 		authState:        AuthPrompt,
 		feedListWidth:    cfg.Display.FeedListWidth,
 		articleListWidth: cfg.Display.ArticleListWidth,
 		feeds:            []db.Feed{},
+		tags:             []db.Tag{},
+		categories:       []db.Category{},
 		articles:         []db.FeedItem{},
 	}
 }
@@ -126,7 +144,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authState = AuthSuccess
 		m.currentView = FeedsView
 		m.statusMessage = "Successfully authenticated! Syncing from Nostr..."
-		return m, tea.Batch(m.loadFeeds(), m.syncFromNostr())
+		return m, tea.Batch(m.loadFeeds(), m.loadTags(), m.loadCategories(), m.syncFromNostr())
 		
 	case authErrorMsg:
 		m.authState = AuthError
@@ -135,13 +153,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case feedsLoadedMsg:
 		m.feeds = msg
 		
+	case tagsLoadedMsg:
+		m.tags = msg
+		
+	case categoriesLoadedMsg:
+		m.categories = msg
+		
+	case feedsForTagLoadedMsg:
+		m.feeds = msg
+		m.selectedFeedIdx = 0
+		
+	case feedsForCategoryLoadedMsg:
+		m.feeds = msg
+		m.selectedFeedIdx = 0
+		
 	case syncCompleteMsg:
 		if msg.error != nil {
 			m.statusMessage = fmt.Sprintf("Sync failed: %s", msg.error)
 		} else {
 			m.statusMessage = fmt.Sprintf("Synced from Nostr! Added %d feeds", msg.feedsAdded)
-			// Reload feeds after sync
-			return m, m.loadFeeds()
+			// Reload all data after sync
+			return m, tea.Batch(m.loadFeeds(), m.loadTags(), m.loadCategories())
 		}
 		
 	case errMsg:
@@ -266,24 +298,82 @@ func centerText(text string, width int) string {
 func (m *Model) renderFeeds() string {
 	var s strings.Builder
 	
-	// Title bar
-	title := styles.HeaderStyle.Render("📰 Nostr-Feedz")
+	// Title bar with view mode
+	viewModeStr := ""
+	switch m.viewMode {
+	case ViewModeFeeds:
+		viewModeStr = "📰 All Feeds"
+	case ViewModeTags:
+		viewModeStr = "🏷️  Tags"
+	case ViewModeCategories:
+		viewModeStr = "📂 Categories"
+	}
+	
+	title := styles.HeaderStyle.Render(viewModeStr)
 	s.WriteString(title)
+	s.WriteString("\n")
+	
+	// View mode toggle hint
+	s.WriteString(styles.MutedStyle.Render("Press Tab to switch views: Feeds • Tags • Categories"))
 	s.WriteString("\n\n")
 	
-	if len(m.feeds) == 0 {
-		s.WriteString(styles.MutedStyle.Render("No feeds yet. Press 'a' to add a feed."))
-	} else {
-		s.WriteString(styles.SuccessStyle.Render(fmt.Sprintf("📁 %d feeds", len(m.feeds))))
-		s.WriteString("\n\n")
-		
-		for i, feed := range m.feeds {
-			if i == m.selectedFeedIdx {
-				s.WriteString(styles.SelectedStyle.Render("▸ " + feed.Title))
-			} else {
-				s.WriteString(styles.FeedItemStyle.Render("  " + feed.Title))
+	// Render content based on view mode
+	switch m.viewMode {
+	case ViewModeFeeds:
+		if len(m.feeds) == 0 {
+			s.WriteString(styles.MutedStyle.Render("No feeds yet. Press 's' to sync from Nostr."))
+		} else {
+			s.WriteString(styles.SuccessStyle.Render(fmt.Sprintf("📁 %d feeds", len(m.feeds))))
+			s.WriteString("\n\n")
+			
+			for i, feed := range m.feeds {
+				if i == m.selectedFeedIdx {
+					s.WriteString(styles.SelectedStyle.Render("▸ " + feed.Title))
+				} else {
+					s.WriteString(styles.FeedItemStyle.Render("  " + feed.Title))
+				}
+				s.WriteString("\n")
 			}
-			s.WriteString("\n")
+		}
+		
+	case ViewModeTags:
+		if len(m.tags) == 0 {
+			s.WriteString(styles.MutedStyle.Render("No tags yet. Tags will appear after syncing from Nostr."))
+		} else {
+			s.WriteString(styles.SuccessStyle.Render(fmt.Sprintf("🏷️  %d tags", len(m.tags))))
+			s.WriteString("\n\n")
+			
+			for i, tag := range m.tags {
+				if i == m.selectedTagIdx {
+					s.WriteString(styles.SelectedStyle.Render("▸ " + tag.Name))
+				} else {
+					s.WriteString(styles.FeedItemStyle.Render("  " + tag.Name))
+				}
+				s.WriteString("\n")
+			}
+		}
+		
+	case ViewModeCategories:
+		if len(m.categories) == 0 {
+			s.WriteString(styles.MutedStyle.Render("No categories yet. Categories will appear after syncing from Nostr."))
+		} else {
+			s.WriteString(styles.SuccessStyle.Render(fmt.Sprintf("📂 %d categories", len(m.categories))))
+			s.WriteString("\n\n")
+			
+			for i, cat := range m.categories {
+				icon := cat.Icon
+				if icon == "" {
+					icon = "📁"
+				}
+				displayName := icon + " " + cat.Name
+				
+				if i == m.selectedCategoryIdx {
+					s.WriteString(styles.SelectedStyle.Render("▸ " + displayName))
+				} else {
+					s.WriteString(styles.FeedItemStyle.Render("  " + displayName))
+				}
+				s.WriteString("\n")
+			}
 		}
 	}
 	
@@ -292,9 +382,10 @@ func (m *Model) renderFeeds() string {
 	// Status bar
 	statusBar := styles.StatusBarStyle.Render(
 		styles.RenderKeyValue("q", "quit") + " • " +
-		styles.RenderKeyValue("a", "add feed") + " • " +
+		styles.RenderKeyValue("tab", "switch view") + " • " +
 		styles.RenderKeyValue("↑↓", "navigate") + " • " +
-		styles.RenderKeyValue("enter", "open"))
+		styles.RenderKeyValue("enter", "open") + " • " +
+		styles.RenderKeyValue("s", "sync"))
 	s.WriteString(statusBar)
 	
 	if m.statusMessage != "" {
