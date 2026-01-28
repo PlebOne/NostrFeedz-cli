@@ -1,0 +1,36 @@
+# Binaries
+nostrfeedz
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local data
+*.db
+*.db-journal
+
+# Config (may contain sensitive data)
+config.yaml
