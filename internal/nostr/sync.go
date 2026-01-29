@@ -73,10 +73,6 @@ func (c *Client) FetchSubscriptions(pubkey string) (*SubscriptionList, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	
-	// Debug: log the raw event content
-	fmt.Printf("DEBUG: Found subscription event, content length: %d bytes\n", len(events[0].Content))
-	fmt.Printf("DEBUG: Event content preview: %s\n", events[0].Content[:min(200, len(events[0].Content))])
 
 	var list SubscriptionList
 	if err := json.Unmarshal([]byte(events[0].Content), &list); err != nil {

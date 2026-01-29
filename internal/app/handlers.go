@@ -379,19 +379,12 @@ func (m *Model) syncFromNostr() tea.Cmd {
 		}
 
 		feedsAdded := 0
-		
-		// Debug: log what we got
-		if subs != nil {
-			fmt.Printf("DEBUG: Found %d RSS feeds, %d Nostr feeds\n", len(subs.RSS), len(subs.Nostr))
-		}
 
 		// Add RSS feeds to local DB
 		for _, url := range subs.RSS {
-			fmt.Printf("DEBUG: Processing RSS feed: %s\n", url)
 			// Check if feed already exists
 			existing, err := m.db.GetFeedByURL(url)
 			if err == nil && existing != nil {
-				fmt.Printf("DEBUG: Feed already exists, skipping: %s\n", url)
 				continue // Feed already exists
 			}
 
@@ -407,13 +400,10 @@ func (m *Model) syncFromNostr() tea.Cmd {
 			}
 
 			if err := m.db.CreateFeed(feed); err == nil {
-				fmt.Printf("DEBUG: Added feed: %s\n", url)
 				feedsAdded++
 				
 				// Fetch RSS metadata in background to update title
 				go m.updateRSSFeedMetadata(feed)
-			} else {
-				fmt.Printf("DEBUG: Failed to add feed %s: %v\n", url, err)
 			}
 		}
 
