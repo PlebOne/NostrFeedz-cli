@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"time"
 	
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/blacktop/go-termimg"
 	"github.com/mmcdole/gofeed"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -146,7 +149,14 @@ func (m *Model) updateFeeds(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedFeedIdx < len(m.feeds) {
 				m.currentFeed = &m.feeds[m.selectedFeedIdx]
 				m.currentView = ArticlesView
-				// TODO: Load articles for this feed
+				m.selectedArticleIdx = 0
+				m.loading = true
+				m.statusMessage = "Loading articles..."
+				// First try to load from database, then fetch if needed
+				return m, tea.Batch(
+					m.loadArticlesForFeed(m.currentFeed.ID),
+					m.fetchArticles(m.currentFeed),
+				)
 			}
 		case ViewModeTags:
 			if m.selectedTagIdx < len(m.tags) {
@@ -173,19 +183,249 @@ func (m *Model) updateFeeds(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateArticles(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// TODO: Implement article navigation
 	switch msg.String() {
 	case "esc":
 		m.currentView = FeedsView
+		m.articles = []db.FeedItem{} // Clear articles
+		m.selectedArticleIdx = 0
+		// Reload unread counts when going back to feeds
+		return m, m.loadUnreadCounts()
+		
+	case "up", "k":
+		if m.selectedArticleIdx > 0 {
+			m.selectedArticleIdx--
+		}
+		
+	case "down", "j":
+		if m.selectedArticleIdx < len(m.articles)-1 {
+			m.selectedArticleIdx++
+		}
+		
+	case "enter":
+		if m.selectedArticleIdx < len(m.articles) {
+			m.currentArticle = &m.articles[m.selectedArticleIdx]
+			m.currentView = ReaderView
+			m.articleScrollOffset = 0
+			m.selectedImageIdx = 0 // Reset to first image
+			m.selectedVideoIdx = 0 // Reset to first video
+			
+			// Mark as read
+			m.db.MarkItemRead(m.currentArticle.ID, true)
+			m.currentArticle.IsRead = true
+			
+			// Extract media from content and article URL
+			m.currentMedia = m.renderer.ExtractMedia(m.currentArticle.Content, m.currentArticle.URL)
+			
+			// Preload images in background
+			if m.currentMedia != nil && len(m.currentMedia.Images) > 0 {
+				m.imgCache.PreloadArticleImages(m.currentMedia.Images)
+			}
+		}
+		
+	case "r":
+		// Refresh - fetch articles again
+		if m.currentFeed != nil {
+			m.loading = true
+			m.statusMessage = "Refreshing..."
+			return m, m.fetchArticles(m.currentFeed)
+		}
 	}
 	return m, nil
 }
 
 func (m *Model) updateReader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// TODO: Implement reader navigation
 	switch msg.String() {
 	case "esc":
+		// ESC always goes back to articles (closes image if open)
+		if m.inlineImageData != "" {
+			termimg.ClearAll() // Clear terminal images
+			m.inlineImageData = ""
+		}
 		m.currentView = ArticlesView
+		m.currentArticle = nil
+		m.articleScrollOffset = 0
+		return m, tea.ClearScreen
+		
+	case "q":
+		// q just closes image if showing, otherwise does nothing
+		if m.inlineImageData != "" {
+			termimg.ClearAll() // Clear terminal images
+			m.inlineImageData = ""
+			m.statusMessage = ""
+			return m, tea.ClearScreen
+		}
+		
+	case "up", "k":
+		// Don't scroll if showing image
+		if m.inlineImageData == "" && m.articleScrollOffset > 0 {
+			m.articleScrollOffset--
+		}
+		
+	case "down", "j":
+		// Don't scroll if showing image
+		if m.inlineImageData == "" {
+			m.articleScrollOffset++
+		}
+		
+	case "pageup":
+		m.articleScrollOffset -= m.height - 10
+		if m.articleScrollOffset < 0 {
+			m.articleScrollOffset = 0
+		}
+		
+	case "pagedown", " ":
+		m.articleScrollOffset += m.height - 10
+		
+	case "o":
+		// Open in browser
+		if m.currentArticle != nil && m.currentArticle.URL != "" {
+			// Try to open with xdg-open
+			openInBrowser(m.currentArticle.URL)
+			m.statusMessage = "Opened in browser"
+		}
+		
+	case "i":
+		// Open image in external viewer
+		if m.currentMedia == nil {
+			m.statusMessage = "No media found in article"
+			return m, nil
+		}
+		if len(m.currentMedia.Images) == 0 {
+			m.statusMessage = "No images found in article"
+			return m, nil
+		}
+		
+		// Get cached image path or download if needed
+		imageURL := m.currentMedia.Images[m.selectedImageIdx]
+		m.statusMessage = fmt.Sprintf("Loading image from cache...")
+		
+		cachePath, err := m.imgCache.GetCached(imageURL)
+		if err != nil {
+			// Not cached yet, download it
+			m.statusMessage = "Downloading image..."
+			cachePath, err = m.imgCache.Download(imageURL)
+			if err != nil {
+				m.statusMessage = fmt.Sprintf("Failed to load image: %v", err)
+				return m, nil
+			}
+		}
+		
+		m.statusMessage = fmt.Sprintf("Opening image: %s", cachePath)
+		m.openImage(cachePath)
+		
+		if len(m.currentMedia.Images) > 1 {
+			m.statusMessage = fmt.Sprintf("Viewing image %d of %d (← → to navigate, q to close)", 
+				m.selectedImageIdx+1, len(m.currentMedia.Images))
+		} else {
+			m.statusMessage = "Viewing image (press 'q' to close)"
+		}
+		
+	case "left", "h":
+		// Previous image
+		if m.currentMedia != nil && len(m.currentMedia.Images) > 1 {
+			if m.selectedImageIdx > 0 {
+				m.selectedImageIdx--
+			} else {
+				m.selectedImageIdx = len(m.currentMedia.Images) - 1 // Wrap around
+			}
+			
+			// Auto-open the new selection
+			imageURL := m.currentMedia.Images[m.selectedImageIdx]
+			cachePath, err := m.imgCache.GetCached(imageURL)
+			if err != nil {
+				cachePath, err = m.imgCache.Download(imageURL)
+				if err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to load image: %v", err)
+					return m, nil
+				}
+			}
+			m.openImage(cachePath)
+			m.statusMessage = fmt.Sprintf("Viewing image %d of %d (← → to navigate)", 
+				m.selectedImageIdx+1, len(m.currentMedia.Images))
+		}
+		
+	case "right", "l":
+		// Next image
+		if m.currentMedia != nil && len(m.currentMedia.Images) > 1 {
+			if m.selectedImageIdx < len(m.currentMedia.Images)-1 {
+				m.selectedImageIdx++
+			} else {
+				m.selectedImageIdx = 0 // Wrap around
+			}
+			
+			// Auto-open the new selection
+			imageURL := m.currentMedia.Images[m.selectedImageIdx]
+			cachePath, err := m.imgCache.GetCached(imageURL)
+			if err != nil {
+				cachePath, err = m.imgCache.Download(imageURL)
+				if err != nil {
+					m.statusMessage = fmt.Sprintf("Failed to load image: %v", err)
+					return m, nil
+				}
+			}
+			m.openImage(cachePath)
+			m.statusMessage = fmt.Sprintf("Viewing image %d of %d (← → to navigate)", 
+				m.selectedImageIdx+1, len(m.currentMedia.Images))
+		}
+		
+	case "I":
+		// Force external image viewer
+		if m.currentMedia != nil && len(m.currentMedia.Images) > 0 {
+			m.openImage(m.currentMedia.Images[0])
+			m.statusMessage = "Opened image in external viewer"
+		}
+		
+	case "v":
+		// Open video in external player
+		if m.currentMedia == nil {
+			m.statusMessage = "No media found in article"
+			return m, nil
+		}
+		if len(m.currentMedia.Videos) == 0 {
+			m.statusMessage = "No videos found in article"
+			return m, nil
+		}
+		
+		videoURL := m.currentMedia.Videos[m.selectedVideoIdx].URL
+		m.statusMessage = fmt.Sprintf("Opening video...")
+		m.openVideo(videoURL)
+		
+		if len(m.currentMedia.Videos) > 1 {
+			m.statusMessage = fmt.Sprintf("Playing video %d of %d (Shift+← Shift+→ to navigate)", 
+				m.selectedVideoIdx+1, len(m.currentMedia.Videos))
+		} else {
+			m.statusMessage = "Playing video"
+		}
+		
+	case "shift+left", "H":
+		// Previous video
+		if m.currentMedia != nil && len(m.currentMedia.Videos) > 1 {
+			if m.selectedVideoIdx > 0 {
+				m.selectedVideoIdx--
+			} else {
+				m.selectedVideoIdx = len(m.currentMedia.Videos) - 1 // Wrap around
+			}
+			
+			videoURL := m.currentMedia.Videos[m.selectedVideoIdx].URL
+			m.openVideo(videoURL)
+			m.statusMessage = fmt.Sprintf("Playing video %d of %d (Shift+← Shift+→ to navigate)", 
+				m.selectedVideoIdx+1, len(m.currentMedia.Videos))
+		}
+		
+	case "shift+right", "L":
+		// Next video
+		if m.currentMedia != nil && len(m.currentMedia.Videos) > 1 {
+			if m.selectedVideoIdx < len(m.currentMedia.Videos)-1 {
+				m.selectedVideoIdx++
+			} else {
+				m.selectedVideoIdx = 0 // Wrap around
+			}
+			
+			videoURL := m.currentMedia.Videos[m.selectedVideoIdx].URL
+			m.openVideo(videoURL)
+			m.statusMessage = fmt.Sprintf("Playing video %d of %d (Shift+← Shift+→ to navigate)", 
+				m.selectedVideoIdx+1, len(m.currentMedia.Videos))
+		}
 	}
 	return m, nil
 }
@@ -314,6 +554,7 @@ type tagsLoadedMsg []db.Tag
 type categoriesLoadedMsg []db.Category
 type feedsForTagLoadedMsg []db.Feed
 type feedsForCategoryLoadedMsg []db.Feed
+type unreadCountsLoadedMsg map[string]int
 
 func (m *Model) loadTags() tea.Cmd {
 	return func() tea.Msg {
@@ -331,7 +572,17 @@ func (m *Model) loadCategories() tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
-		return categoriesLoadedMsg(categories)
+		
+		// Add "Uncategorized" as first category
+		uncategorized := db.Category{
+			ID:   "uncategorized",
+			Name: "Uncategorized",
+			Icon: "📋",
+			SortOrder: -1,
+		}
+		allCategories := append([]db.Category{uncategorized}, categories...)
+		
+		return categoriesLoadedMsg(allCategories)
 	}
 }
 
@@ -347,7 +598,16 @@ func (m *Model) loadFeedsForTag(tagID string) tea.Cmd {
 
 func (m *Model) loadFeedsForCategory(categoryID string) tea.Cmd {
 	return func() tea.Msg {
-		feeds, err := m.db.GetFeedsByCategory(categoryID)
+		var feeds []db.Feed
+		var err error
+		
+		if categoryID == "uncategorized" {
+			// Get feeds without a category
+			feeds, err = m.db.GetUncategorizedFeeds()
+		} else {
+			feeds, err = m.db.GetFeedsByCategory(categoryID)
+		}
+		
 		if err != nil {
 			return errMsg(err)
 		}
@@ -358,25 +618,29 @@ func (m *Model) loadFeedsForCategory(categoryID string) tea.Cmd {
 func (m *Model) syncFromNostr() tea.Cmd {
 	return func() tea.Msg {
 		if m.nostr == nil {
-			return syncCompleteMsg{0, fmt.Errorf("not connected to Nostr")}
+			return syncCompleteMsg{0, 0, 0, fmt.Errorf("not connected to Nostr")}
 		}
 
 		// Get user's public key
 		pubkey := m.nostr.GetPublicKey()
 		if pubkey == "" {
-			return syncCompleteMsg{0, fmt.Errorf("no public key available")}
+			return syncCompleteMsg{0, 0, 0, fmt.Errorf("no public key available")}
 		}
 
 		// Fetch subscription list from Nostr
 		subs, err := m.nostr.FetchSubscriptions(pubkey)
 		if err != nil {
-			return syncCompleteMsg{0, fmt.Errorf("failed to fetch subscriptions: %w", err)}
+			return syncCompleteMsg{0, 0, 0, fmt.Errorf("failed to fetch subscriptions: %w", err)}
 		}
 
 		if subs == nil {
 			// No subscriptions found on Nostr yet
-			return syncCompleteMsg{0, nil}
+			return syncCompleteMsg{0, 0, 0, nil}
 		}
+		
+		// Debug: Log what we received
+		fmt.Fprintf(os.Stderr, "DEBUG: Sync received - RSS: %d, Nostr: %d, Tags: %d feeds, Categories: %d feeds\n",
+			len(subs.RSS), len(subs.Nostr), len(subs.Tags), len(subs.Categories))
 
 		feedsAdded := 0
 
@@ -437,6 +701,7 @@ func (m *Model) syncFromNostr() tea.Cmd {
 
 		// 3. Import tags from Nostr
 		// Tags structure: map[feedURL][]tagNames
+		tagsImported := 0
 		if len(subs.Tags) > 0 {
 			// First, collect all unique tag names
 			uniqueTags := make(map[string]bool)
@@ -454,6 +719,7 @@ func (m *Model) syncFromNostr() tea.Cmd {
 				}
 				// Try to create tag (ignore if exists)
 				m.db.CreateTag(tag)
+				tagsImported++
 			}
 			
 			// Now associate feeds with their tags
@@ -472,6 +738,7 @@ func (m *Model) syncFromNostr() tea.Cmd {
 		}
 
 		// 4. Import categories from Nostr
+		categoriesImported := 0
 		if len(subs.Categories) > 0 {
 			for feedURL, catInfo := range subs.Categories {
 				feed, err := m.db.GetFeedByURL(feedURL)
@@ -495,6 +762,8 @@ func (m *Model) syncFromNostr() tea.Cmd {
 					feed.CategoryID = category.ID
 					if err := m.db.UpdateFeed(feed); err != nil {
 						fmt.Printf("Warning: failed to update feed category: %v\n", err)
+					} else {
+						categoriesImported++
 					}
 				}
 			}
@@ -517,7 +786,7 @@ func (m *Model) syncFromNostr() tea.Cmd {
 			}
 		}
 
-		return syncCompleteMsg{feedsAdded, nil}
+		return syncCompleteMsg{feedsAdded, tagsImported, categoriesImported, nil}
 	}
 }
 
@@ -588,5 +857,188 @@ feed.Description = profile.About
 // Save to database
 if err := m.db.UpdateFeed(feed); err != nil {
 fmt.Printf("Warning: Failed to update Nostr feed metadata: %v\n", err)
+}
+}
+
+// Article message types
+type articlesLoadedMsg []db.FeedItem
+type articlesFetchedMsg struct {
+feedID   string
+articles []db.FeedItem
+err      error
+}
+
+
+type inlineImageMsg struct {
+	imageData string
+	err       error
+}
+// fetchArticles fetches articles for a feed (RSS or Nostr)
+func (m *Model) fetchArticles(feed *db.Feed) tea.Cmd {
+return func() tea.Msg {
+var articles []*db.FeedItem
+var err error
+
+// Fetch based on feed type
+if feed.Type == "rss" {
+articles, err = m.fetcher.FetchRSSArticles(feed.URL, feed.ID)
+} else if feed.Type == "nostr" {
+articles, err = m.fetcher.FetchNostrArticles(feed.NPUB, feed.ID)
+} else {
+return articlesFetchedMsg{feed.ID, nil, fmt.Errorf("unknown feed type: %s", feed.Type)}
+}
+
+if err != nil {
+return articlesFetchedMsg{feed.ID, nil, err}
+}
+
+// Store articles in database
+storedArticles := []db.FeedItem{}
+for _, article := range articles {
+	if err := m.db.CreateFeedItem(article); err == nil {
+		storedArticles = append(storedArticles, *article)
+		
+		// Preload images for this article in background
+		media := m.renderer.ExtractMedia(article.Content, article.URL)
+		if media != nil && len(media.Images) > 0 {
+			m.imgCache.PreloadArticleImages(media.Images)
+		}
+	}
+}
+
+// Update last fetched timestamp
+m.db.UpdateLastFetched(feed.ID)
+
+return articlesFetchedMsg{feed.ID, storedArticles, nil}
+}
+}
+
+// loadArticlesForFeed loads articles from database for a feed
+func (m *Model) loadArticlesForFeed(feedID string) tea.Cmd {
+return func() tea.Msg {
+articles, err := m.db.GetFeedItemsByFeed(feedID)
+if err != nil {
+return errMsg(err)
+}
+return articlesLoadedMsg(articles)
+}
+}
+
+// loadArticlesForFeeds loads articles for multiple feeds (tags/categories)
+func (m *Model) loadArticlesForFeeds(feedIDs []string) tea.Cmd {
+return func() tea.Msg {
+articles, err := m.db.GetFeedItemsByFeeds(feedIDs)
+if err != nil {
+return errMsg(err)
+}
+return articlesLoadedMsg(articles)
+}
+}
+
+// Helper functions for opening external applications
+func openInBrowser(url string) {
+exec.Command("xdg-open", url).Start()
+}
+
+func (m *Model) openImage(url string) {
+// Kill previous image viewer if still running
+if m.imageViewerPID > 0 {
+// Try to kill the previous viewer
+if process, err := os.FindProcess(m.imageViewerPID); err == nil {
+process.Kill()
+}
+m.imageViewerPID = 0
+}
+
+viewers := []struct {
+cmd  string
+args []string
+}{
+{"sxiv", []string{"-b", "-g", "800x600", url}},
+{"feh", []string{"--scale-down", "--auto-zoom", "--borderless", "--geometry", "800x600", url}},
+{"imv-wayland", []string{url}},
+{"imv-x11", []string{url}},
+{"eog", []string{url}},
+{"eom", []string{url}},
+{"xdg-open", []string{url}},
+}
+
+for _, viewer := range viewers {
+cmd := exec.Command(viewer.cmd, viewer.args...)
+if err := cmd.Start(); err == nil {
+m.imageViewerPID = cmd.Process.Pid
+return
+}
+}
+}
+
+func (m *Model) openVideo(url string) {
+// Kill previous video player if still running
+if m.videoPlayerPID > 0 {
+if process, err := os.FindProcess(m.videoPlayerPID); err == nil {
+process.Kill()
+}
+m.videoPlayerPID = 0
+}
+
+players := []struct {
+cmd  string
+args []string
+}{
+{"mpv", []string{"--geometry=800x600", url}},
+{"vlc", []string{"--width=800", "--height=600", url}},
+{"mplayer", []string{url}},
+{"xdg-open", []string{url}},
+}
+
+for _, player := range players {
+cmd := exec.Command(player.cmd, player.args...)
+if err := cmd.Start(); err == nil {
+m.videoPlayerPID = cmd.Process.Pid
+return
+}
+}
+}
+
+// showInlineImage fetches and displays an image inline in the terminal
+func (m *Model) showInlineImage(imageURL string) tea.Cmd {
+return func() tea.Msg {
+// Check cache first
+var imageData string
+var err error
+
+if m.imgCache.IsCached(imageURL) {
+// Use cached version
+cachePath, cacheErr := m.imgCache.GetCached(imageURL)
+if cacheErr == nil {
+imageData, err = m.renderer.RenderImageInlineFromFile(cachePath, 80, 24)
+} else {
+err = cacheErr
+}
+} else {
+// Download and cache
+cachePath, dlErr := m.imgCache.Download(imageURL)
+if dlErr == nil {
+imageData, err = m.renderer.RenderImageInlineFromFile(cachePath, 80, 24)
+} else {
+err = dlErr
+}
+}
+
+if err != nil {
+return inlineImageMsg{"", err}
+}
+
+return inlineImageMsg{imageData, nil}
+}
+}
+
+func (m *Model) loadUnreadCounts() tea.Cmd {
+return func() tea.Msg {
+counts, err := m.db.GetUnreadCounts()
+if err != nil {
+return errMsg(err)
+}
+return unreadCountsLoadedMsg(counts)
 }
 }

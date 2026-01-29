@@ -447,3 +447,212 @@ feeds = append(feeds, feed)
 }
 return feeds, rows.Err()
 }
+
+// Article/Item methods
+func (db *DB) GetFeedItemsByFeed(feedID string) ([]FeedItem, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, feed_id, guid, title, COALESCE(content, ''), COALESCE(url, ''),
+		       COALESCE(author, ''), published_at, is_read, is_favorite,
+		       COALESCE(thumbnail, ''), COALESCE(video_id, ''), created_at
+		FROM feed_items
+		WHERE feed_id = ?
+		ORDER BY published_at DESC
+		LIMIT 100
+	`, feedID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []FeedItem
+	for rows.Next() {
+		var item FeedItem
+		var publishedAt, createdAt int64
+		var isRead, isFavorite int
+		if err := rows.Scan(&item.ID, &item.FeedID, &item.GUID, &item.Title, &item.Content,
+			&item.URL, &item.Author, &publishedAt, &isRead, &isFavorite,
+			&item.Thumbnail, &item.VideoID, &createdAt); err != nil {
+			return nil, err
+		}
+		item.PublishedAt = time.Unix(publishedAt, 0)
+		item.CreatedAt = time.Unix(createdAt, 0)
+		item.IsRead = isRead == 1
+		item.IsFavorite = isFavorite == 1
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (db *DB) GetFeedItemsByFeeds(feedIDs []string) ([]FeedItem, error) {
+if len(feedIDs) == 0 {
+return []FeedItem{}, nil
+}
+
+// Build query with placeholders
+placeholders := ""
+for i := range feedIDs {
+if i > 0 {
+placeholders += ", "
+}
+placeholders += "?"
+}
+
+query := fmt.Sprintf(`
+SELECT id, feed_id, guid, title, COALESCE(content, ''), COALESCE(url, ''),
+       COALESCE(author, ''), published_at, is_read, is_favorite,
+       COALESCE(thumbnail, ''), COALESCE(video_id, ''), created_at
+FROM feed_items
+WHERE feed_id IN (%s)
+ORDER BY published_at DESC
+LIMIT 100
+`, placeholders)
+
+// Convert feedIDs to interface{} slice for query
+args := make([]interface{}, len(feedIDs))
+for i, id := range feedIDs {
+args[i] = id
+}
+
+rows, err := db.conn.Query(query, args...)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var items []FeedItem
+for rows.Next() {
+var item FeedItem
+var publishedAt, createdAt int64
+var isRead, isFavorite int
+if err := rows.Scan(&item.ID, &item.FeedID, &item.GUID, &item.Title, &item.Content,
+&item.URL, &item.Author, &publishedAt, &isRead, &isFavorite,
+&item.Thumbnail, &item.VideoID, &createdAt); err != nil {
+return nil, err
+}
+item.PublishedAt = time.Unix(publishedAt, 0)
+item.CreatedAt = time.Unix(createdAt, 0)
+item.IsRead = isRead == 1
+item.IsFavorite = isFavorite == 1
+items = append(items, item)
+}
+return items, rows.Err()
+}
+
+func (db *DB) GetFeedItem(itemID string) (*FeedItem, error) {
+var item FeedItem
+var publishedAt, createdAt int64
+var isRead, isFavorite int
+err := db.conn.QueryRow(`
+SELECT id, feed_id, guid, title, COALESCE(content, ''), COALESCE(url, ''),
+       COALESCE(author, ''), published_at, is_read, is_favorite,
+       COALESCE(thumbnail, ''), COALESCE(video_id, ''), created_at
+FROM feed_items
+WHERE id = ?
+`, itemID).Scan(&item.ID, &item.FeedID, &item.GUID, &item.Title, &item.Content,
+&item.URL, &item.Author, &publishedAt, &isRead, &isFavorite,
+&item.Thumbnail, &item.VideoID, &createdAt)
+
+if err != nil {
+return nil, err
+}
+
+item.PublishedAt = time.Unix(publishedAt, 0)
+item.CreatedAt = time.Unix(createdAt, 0)
+item.IsRead = isRead == 1
+item.IsFavorite = isFavorite == 1
+
+return &item, nil
+}
+
+func (db *DB) UpdateLastFetched(feedID string) error {
+now := time.Now()
+_, err := db.conn.Exec(`
+UPDATE feeds SET last_fetched_at = ? WHERE id = ?
+`, now.Unix(), feedID)
+return err
+}
+
+// GetUnreadCountByFeed returns the count of unread items for a specific feed
+func (db *DB) GetUnreadCountByFeed(feedID string) (int, error) {
+var count int
+err := db.conn.QueryRow(`
+SELECT COUNT(*) FROM feed_items 
+WHERE feed_id = ? AND is_read = 0
+`, feedID).Scan(&count)
+return count, err
+}
+
+// GetUnreadCounts returns a map of feed_id to unread count for all feeds
+func (db *DB) GetUnreadCounts() (map[string]int, error) {
+rows, err := db.conn.Query(`
+SELECT feed_id, COUNT(*) as unread_count 
+FROM feed_items 
+WHERE is_read = 0 
+GROUP BY feed_id
+`)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+counts := make(map[string]int)
+for rows.Next() {
+var feedID string
+var count int
+if err := rows.Scan(&feedID, &count); err != nil {
+return nil, err
+}
+counts[feedID] = count
+}
+
+return counts, rows.Err()
+}
+
+// GetUncategorizedFeeds returns all feeds without a category
+func (db *DB) GetUncategorizedFeeds() ([]Feed, error) {
+rows, err := db.conn.Query(`
+SELECT id, type, url, npub, title, description, last_fetched_at, category_id, created_at
+FROM feeds
+WHERE category_id IS NULL OR category_id = ''
+ORDER BY title
+`)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var feeds []Feed
+for rows.Next() {
+var feed Feed
+var lastFetched, createdAt int64
+var categoryID sql.NullString
+
+err := rows.Scan(
+&feed.ID,
+&feed.Type,
+&feed.URL,
+&feed.NPUB,
+&feed.Title,
+&feed.Description,
+&lastFetched,
+&categoryID,
+&createdAt,
+)
+if err != nil {
+return nil, err
+}
+
+if lastFetched > 0 {
+t := time.Unix(lastFetched, 0)
+feed.LastFetchedAt = &t
+}
+feed.CreatedAt = time.Unix(createdAt, 0)
+if categoryID.Valid {
+feed.CategoryID = categoryID.String
+}
+
+feeds = append(feeds, feed)
+}
+
+return feeds, rows.Err()
+}

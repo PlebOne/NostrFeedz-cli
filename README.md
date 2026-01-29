@@ -4,17 +4,37 @@ A beautiful command-line interface for Nostr-Feedz - your RSS and Nostr feed rea
 
 ## Features
 
-- 🔐 **Multiple Authentication Methods**:
-  - **Pleb_Signer** (NIP-55 via D-Bus) - Recommended for Linux desktop
-  - **NIP-46** remote signer support architecture
-  - **nsec** private key (fallback)
-- 📰 **RSS & Nostr Feeds** - Subscribe to RSS feeds and Nostr long-form content (NIP-23)
-- 🎨 **Beautiful TUI** - Built with Bubble Tea for a modern terminal experience
-- 🔄 **Cross-Device Sync** - Sync subscriptions and read status via Nostr (kinds 30404, 30405)
-- 💾 **Offline Support** - Local SQLite database for offline reading
-- 🏷️ **Organization** - Organize feeds with tags and categories
-- ⭐ **Favorites** - Star articles for later reading
-- 🔍 **Search** - Find articles across all your feeds
+### 🔐 Authentication
+- **Pleb_Signer** (NIP-55 via D-Bus) - Recommended for Linux desktop
+- **NIP-46** remote signer support
+- **nsec** private key (fallback)
+
+### 📰 Feed Management
+- RSS & Nostr Feeds - Subscribe to RSS feeds and Nostr long-form content (NIP-23)
+- Cross-Device Sync - Sync subscriptions and read status via Nostr (kinds 30404, 30405)
+- Tags & Categories - Organize feeds with tags and categories
+- Uncategorized view - Find feeds without organization
+
+### 🎨 Media Support
+- **Images** - External viewer integration (sxiv, feh, imv, eog)
+  - Image caching with background downloads
+  - Navigation with arrow keys
+  - Automatic cache cleanup
+- **Videos** - Video player support (mpv, vlc, mplayer)
+  - YouTube video and Shorts playback
+  - Navigation with Shift+arrow keys
+  - Tiling window manager friendly
+
+### 💾 Offline & Storage
+- Local SQLite database for offline reading
+- Image caching (500MB limit, 30-day expiration)
+- Favorites persistence
+
+### 🎯 Organization
+- Feed list with unread counts
+- Tags for flexible grouping
+- Categories for hierarchical organization
+- Article aggregation across multiple feeds
 
 ## Installation
 
@@ -22,6 +42,9 @@ A beautiful command-line interface for Nostr-Feedz - your RSS and Nostr feed rea
 
 - Go 1.21 or later
 - SQLite3
+- Optional: Image viewer (sxiv, feh, imv, eog)
+- Optional: Video player (mpv, vlc, mplayer)
+- Optional: Pleb_Signer for NIP-55 authentication
 
 ### Build from Source
 
@@ -239,3 +262,69 @@ Built with:
 - **Web App**: https://nostrfeedz.com
 - **GitHub**: https://github.com/PlebOne/Nostr-Feedz
 - **Nostr**: npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7
+
+## Keyboard Shortcuts
+
+### Navigation
+- `↑/↓` or `k/j` - Navigate up/down
+- `Enter` - Open selected item
+- `Esc` - Go back
+- `Tab` - Switch view (Feeds/Tags/Categories)
+- `q` - Quit
+
+### Feeds View
+- `s` - Sync from Nostr
+- Unread counts shown next to each feed
+
+### Articles View
+- `↑/↓` - Scroll through articles
+- `Enter` - Read article (marks as read)
+- `f` - Toggle favorite
+
+### Reader View
+- `↑/↓` - Scroll article
+- `i` - View image (if available)
+- `←/→` - Navigate between images (if multiple)
+- `v` - Play video (if available)
+- `Shift+←/→` - Navigate between videos (if multiple)
+
+### Tags & Categories
+- Navigate with `↑/↓`
+- Press `Enter` to see all articles from feeds with that tag/category
+- **Uncategorized** category shows feeds without assigned category
+
+## Documentation
+
+- [Quick Start Guide](./QUICKSTART.md) - Get started quickly
+- [NIP-55 Setup Guide](./NIP55_GUIDE.md) - Pleb_Signer authentication
+- [Image Viewing](./IMAGE_VIEWING_SIMPLE.md) - External image viewer setup
+- [Video Player](./VIDEO_PLAYER_GUIDE.md) - Video playback configuration
+- [Tags and Categories](./TAGS_AND_CATEGORIES.md) - Organization features
+- [Setting Up Tags & Categories](./SETTING_UP_TAGS_AND_CATEGORIES.md) - Configure in Nostr
+- [TODO & Roadmap](./TODO.md) - Future plans and tasks
+- [Troubleshooting](./TROUBLESHOOTING.md) - Common issues and solutions
+
+## Status
+
+**Version:** 0.1.0-dev (Active Development)
+
+### ✅ Completed Features
+- Authentication (Pleb_Signer NIP-55, NIP-46 architecture, nsec)
+- Feed syncing from Nostr (kind 30404)
+- Read status sync (kind 30405)
+- RSS and Nostr feed fetching
+- Article reading with markdown rendering
+- Image viewing (external viewers)
+- Video playback (mpv, vlc)
+- YouTube video and Shorts support
+- Tags and Categories organization
+- Unread count badges
+- Image caching
+- Process management for external apps
+
+### 🚧 Known Issues
+- Unread counts require ESC to feeds view to refresh
+- Debug output still present (will be removed)
+- Tags/Categories need to be set up in NostrFeedz.com first
+
+See [TODO.md](./TODO.md) for complete roadmap and task list.

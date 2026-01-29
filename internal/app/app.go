@@ -2,12 +2,16 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/plebone/nostrfeedz-cli/internal/cache"
 	"github.com/plebone/nostrfeedz-cli/internal/config"
 	"github.com/plebone/nostrfeedz-cli/internal/db"
+	"github.com/plebone/nostrfeedz-cli/internal/feed"
 	"github.com/plebone/nostrfeedz-cli/internal/nostr"
 	"github.com/plebone/nostrfeedz-cli/pkg/styles"
 )
@@ -42,9 +46,12 @@ const (
 )
 
 type Model struct {
-	cfg    *config.Config
-	db     *db.DB
-	nostr  *nostr.Client
+	cfg      *config.Config
+	db       *db.DB
+	nostr    *nostr.Client
+	fetcher  *feed.Fetcher
+	renderer *feed.Renderer
+	imgCache *cache.ImageCache
 	
 	currentView View
 	viewMode    ViewMode
@@ -60,10 +67,12 @@ type Model struct {
 	tags            []db.Tag
 	categories      []db.Category
 	articles        []db.FeedItem
+	unreadCounts    map[string]int // Feed ID to unread count
 	currentFeed     *db.Feed
 	currentTag      *db.Tag
 	currentCategory *db.Category
 	currentArticle  *db.FeedItem
+	currentMedia    *feed.MediaLinks
 	
 	// UI State
 	width           int
@@ -74,14 +83,32 @@ type Model struct {
 	selectedTagIdx  int
 	selectedCategoryIdx int
 	selectedArticleIdx int
+	selectedImageIdx int
+	selectedVideoIdx int
+	articleScrollOffset int
+	inlineImageData string
 	err             error
 	statusMessage   string
+	loading         bool
+	imageViewerPID  int // Track image viewer process
+	videoPlayerPID  int // Track video player process
 }
 
 func New(cfg *config.Config, database *db.DB) *Model {
+	fetcher := feed.NewFetcher(cfg.Nostr.Relays)
+	renderer, _ := feed.NewRenderer(80) // Default width, will update on window resize
+	
+	// Create image cache directory
+	homeDir, _ := os.UserHomeDir()
+	cacheDir := filepath.Join(homeDir, ".config", "nostrfeedz", "cache", "images")
+	imgCache, _ := cache.NewImageCache(cacheDir, database)
+	
 	return &Model{
 		cfg:              cfg,
 		db:               database,
+		fetcher:          fetcher,
+		renderer:         renderer,
+		imgCache:         imgCache,
 		currentView:      AuthView,
 		viewMode:         ViewModeFeeds,
 		authState:        AuthPrompt,
@@ -138,6 +165,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Recreate renderer with new width
+		if renderer, err := feed.NewRenderer(msg.Width); err == nil {
+			m.renderer = renderer
+		}
 		return m, nil
 		
 	case authSuccessMsg:
@@ -152,6 +183,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		
 	case feedsLoadedMsg:
 		m.feeds = msg
+		// Load unread counts after loading feeds
+		return m, m.loadUnreadCounts()
 		
 	case tagsLoadedMsg:
 		m.tags = msg
@@ -159,21 +192,88 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case categoriesLoadedMsg:
 		m.categories = msg
 		
+	case unreadCountsLoadedMsg:
+		m.unreadCounts = msg
+		
 	case feedsForTagLoadedMsg:
 		m.feeds = msg
 		m.selectedFeedIdx = 0
+		// Load articles from all feeds with this tag
+		if len(msg) > 0 {
+			feedIDs := make([]string, len(msg))
+			for i, feed := range msg {
+				feedIDs[i] = feed.ID
+			}
+			m.loading = true
+			m.statusMessage = "Loading articles..."
+			return m, m.loadArticlesForFeeds(feedIDs)
+		}
 		
 	case feedsForCategoryLoadedMsg:
 		m.feeds = msg
 		m.selectedFeedIdx = 0
+		// Load articles from all feeds in this category
+		if len(msg) > 0 {
+			feedIDs := make([]string, len(msg))
+			for i, feed := range msg {
+				feedIDs[i] = feed.ID
+			}
+			m.loading = true
+			m.statusMessage = "Loading articles..."
+			return m, m.loadArticlesForFeeds(feedIDs)
+		}
+		
+	case articlesLoadedMsg:
+		m.articles = msg
+		m.loading = false
+		if len(msg) > 0 {
+			m.statusMessage = fmt.Sprintf("Loaded %d articles", len(msg))
+		}
+		// Reload unread counts after loading articles
+		return m, m.loadUnreadCounts()
+		
+	case articlesFetchedMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Error fetching articles: %s", msg.err)
+			m.loading = false
+		} else {
+			// Reload articles from database (includes newly fetched)
+			if m.currentFeed != nil && m.currentFeed.ID == msg.feedID {
+				return m, m.loadArticlesForFeed(msg.feedID)
+			}
+		}
 		
 	case syncCompleteMsg:
 		if msg.error != nil {
 			m.statusMessage = fmt.Sprintf("Sync failed: %s", msg.error)
 		} else {
-			m.statusMessage = fmt.Sprintf("Synced from Nostr! Added %d feeds", msg.feedsAdded)
+			statusParts := []string{}
+			if msg.feedsAdded > 0 {
+				statusParts = append(statusParts, fmt.Sprintf("%d feeds", msg.feedsAdded))
+			}
+			if msg.tagsImported > 0 {
+				statusParts = append(statusParts, fmt.Sprintf("%d tags", msg.tagsImported))
+			}
+			if msg.categoriesImported > 0 {
+				statusParts = append(statusParts, fmt.Sprintf("%d categories", msg.categoriesImported))
+			}
+			
+			if len(statusParts) > 0 {
+				m.statusMessage = fmt.Sprintf("Synced! Added: %s", strings.Join(statusParts, ", "))
+			} else {
+				m.statusMessage = "Synced from Nostr! (No new data)"
+			}
 			// Reload all data after sync
 			return m, tea.Batch(m.loadFeeds(), m.loadTags(), m.loadCategories())
+		}
+		
+	case inlineImageMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to display image: %s", msg.err)
+		} else {
+			// Store the inline image data to display
+			m.inlineImageData = msg.imageData
+			m.statusMessage = "Image displayed inline (ESC to close)"
 		}
 		
 	case errMsg:
@@ -327,10 +427,16 @@ func (m *Model) renderFeeds() string {
 			s.WriteString("\n\n")
 			
 			for i, feed := range m.feeds {
+				unreadCount := m.unreadCounts[feed.ID]
+				displayText := feed.Title
+				if unreadCount > 0 {
+					displayText = fmt.Sprintf("%s (%d)", feed.Title, unreadCount)
+				}
+				
 				if i == m.selectedFeedIdx {
-					s.WriteString(styles.SelectedStyle.Render("▸ " + feed.Title))
+					s.WriteString(styles.SelectedStyle.Render("▸ " + displayText))
 				} else {
-					s.WriteString(styles.FeedItemStyle.Render("  " + feed.Title))
+					s.WriteString(styles.FeedItemStyle.Render("  " + displayText))
 				}
 				s.WriteString("\n")
 			}
@@ -396,11 +502,193 @@ func (m *Model) renderFeeds() string {
 }
 
 func (m *Model) renderArticles() string {
-	return "Articles view - Coming soon!"
+	var s strings.Builder
+	
+	// Title with feed name
+	feedName := "Articles"
+	if m.currentFeed != nil {
+		feedName = m.currentFeed.Title
+	} else if m.currentTag != nil {
+		feedName = "Tag: " + m.currentTag.Name
+	} else if m.currentCategory != nil {
+		feedName = "Category: " + m.currentCategory.Name
+	}
+	
+	title := styles.HeaderStyle.Render("📖 " + feedName)
+	s.WriteString(title)
+	s.WriteString("\n\n")
+	
+	if m.loading {
+		s.WriteString(styles.MutedStyle.Render("Loading articles..."))
+		return s.String()
+	}
+	
+	if len(m.articles) == 0 {
+		s.WriteString(styles.MutedStyle.Render("No articles yet. Press 'r' to refresh."))
+	} else {
+		s.WriteString(styles.SuccessStyle.Render(fmt.Sprintf("📰 %d articles", len(m.articles))))
+		s.WriteString("\n\n")
+		
+		// Show articles (limit to visible)
+		maxVisible := m.height - 10
+		start := m.selectedArticleIdx - maxVisible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + maxVisible
+		if end > len(m.articles) {
+			end = len(m.articles)
+		}
+		
+		for i := start; i < end; i++ {
+			article := m.articles[i]
+			
+			// Format article line
+			readIndicator := "  "
+			if article.IsRead {
+				readIndicator = "✓ "
+			}
+			
+			dateStr := article.PublishedAt.Format("Jan 02")
+			title := article.Title
+			if len(title) > 60 {
+				title = title[:57] + "..."
+			}
+			
+			line := fmt.Sprintf("%s%s - %s", readIndicator, dateStr, title)
+			
+			if i == m.selectedArticleIdx {
+				s.WriteString(styles.SelectedStyle.Render("▸ " + line))
+			} else {
+				if article.IsRead {
+					s.WriteString(styles.MutedStyle.Render("  " + line))
+				} else {
+					s.WriteString(styles.FeedItemStyle.Render("  " + line))
+				}
+			}
+			s.WriteString("\n")
+		}
+	}
+	
+	s.WriteString("\n")
+	
+	// Status bar
+	statusBar := styles.StatusBarStyle.Render(
+		styles.RenderKeyValue("esc", "back") + " • " +
+		styles.RenderKeyValue("↑↓", "navigate") + " • " +
+		styles.RenderKeyValue("enter", "read") + " • " +
+		styles.RenderKeyValue("r", "refresh"))
+	s.WriteString(statusBar)
+	
+	if m.statusMessage != "" {
+		s.WriteString("\n" + styles.SuccessStyle.Render(m.statusMessage))
+	}
+	
+	return s.String()
 }
 
 func (m *Model) renderReader() string {
-	return "Reader view - Coming soon!"
+	if m.currentArticle == nil {
+		return "No article selected"
+	}
+	
+	var s strings.Builder
+	
+	// Title
+	title := styles.HeaderStyle.Render(m.currentArticle.Title)
+	s.WriteString(title)
+	s.WriteString("\n")
+	
+	// Metadata
+	meta := fmt.Sprintf("By %s • %s", 
+		m.currentArticle.Author,
+		m.currentArticle.PublishedAt.Format("January 2, 2006"))
+	s.WriteString(styles.MutedStyle.Render(meta))
+	s.WriteString("\n\n")
+	
+	// Render content
+	isHTML := strings.Contains(m.currentArticle.Content, "<html") || 
+	          strings.Contains(m.currentArticle.Content, "<div")
+	
+	// If we have inline image data (from 'i' key), show it instead
+	if m.inlineImageData != "" {
+		s.WriteString(lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#00FF00")).
+			Render("🖼️  IMAGE VIEWER"))
+		s.WriteString("\n")
+		s.WriteString(strings.Repeat("─", m.width))
+		s.WriteString("\n\n")
+		s.WriteString(m.inlineImageData)
+		s.WriteString("\n\n")
+		s.WriteString(strings.Repeat("─", m.width))
+		s.WriteString("\n")
+		s.WriteString(styles.StatusBarStyle.Render(
+			styles.RenderKeyValue("i", "close image") + " • " +
+			styles.RenderKeyValue("ESC", "back to articles") + " • " +
+			styles.RenderKeyValue("I", "external viewer")))
+		s.WriteString("\n")
+		if m.statusMessage != "" {
+			s.WriteString("\n")
+			s.WriteString(styles.MutedStyle.Render(m.statusMessage))
+		}
+		return s.String()
+	}
+	
+	// Use simple rendering (no inline images to avoid freezing)
+	rendered, err := m.renderer.RenderContent(m.currentArticle.Content, isHTML)
+	if err != nil {
+		s.WriteString(styles.ErrorStyle.Render(fmt.Sprintf("Error rendering: %v", err)))
+		s.WriteString("\n\n")
+		s.WriteString(m.currentArticle.Content) // Fallback to raw
+	} else {
+		// Apply scroll offset
+		lines := strings.Split(rendered, "\n")
+		visibleLines := m.height - 8 // Leave room for header/footer
+		
+		start := m.articleScrollOffset
+		if start >= len(lines) {
+			start = len(lines) - visibleLines
+		}
+		if start < 0 {
+			start = 0
+		}
+		
+		end := start + visibleLines
+		if end > len(lines) {
+			end = len(lines)
+		}
+		
+		for i := start; i < end; i++ {
+			s.WriteString(lines[i])
+			s.WriteString("\n")
+		}
+	}
+	
+	// Media list
+	if m.currentMedia != nil {
+		s.WriteString(m.renderer.RenderMediaList(m.currentMedia, m.selectedImageIdx, m.selectedVideoIdx))
+	}
+	
+	s.WriteString("\n")
+	
+	// Status bar
+	statusBarKeys := styles.RenderKeyValue("esc", "back") + " • " +
+		styles.RenderKeyValue("↑↓", "scroll") + " • " +
+		styles.RenderKeyValue("space", "page down")
+	
+	if m.currentMedia != nil && len(m.currentMedia.Images) > 1 {
+		statusBarKeys += " • " + styles.RenderKeyValue("←→", "image")
+	}
+	
+	statusBarKeys += " • " + styles.RenderKeyValue("i", "view") + " • " +
+		styles.RenderKeyValue("o", "browser") + " • " +
+		styles.RenderKeyValue("v", "video")
+	
+	statusBar := styles.StatusBarStyle.Render(statusBarKeys)
+	s.WriteString(statusBar)
+	
+	return s.String()
 }
 
 // Message types
@@ -408,7 +696,9 @@ type authSuccessMsg struct{}
 type authErrorMsg string
 type feedsLoadedMsg []db.Feed
 type syncCompleteMsg struct {
-	feedsAdded int
-	error      error
+	feedsAdded        int
+	tagsImported      int
+	categoriesImported int
+	error             error
 }
 type errMsg error
