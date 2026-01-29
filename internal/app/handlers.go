@@ -436,24 +436,37 @@ func (m *Model) syncFromNostr() tea.Cmd {
 		}
 
 		// 3. Import tags from Nostr
+		// Tags structure: map[feedURL][]tagNames
 		if len(subs.Tags) > 0 {
-			for tagName, feedURLs := range subs.Tags {
-				// Create or get tag
+			// First, collect all unique tag names
+			uniqueTags := make(map[string]bool)
+			for _, tagNames := range subs.Tags {
+				for _, tagName := range tagNames {
+					uniqueTags[tagName] = true
+				}
+			}
+			
+			// Create all tags
+			for tagName := range uniqueTags {
 				tag := &db.Tag{
 					ID:   fmt.Sprintf("tag_%s", tagName),
 					Name: tagName,
 				}
-				
 				// Try to create tag (ignore if exists)
 				m.db.CreateTag(tag)
+			}
+			
+			// Now associate feeds with their tags
+			for feedURL, tagNames := range subs.Tags {
+				feed, err := m.db.GetFeedByURL(feedURL)
+				if err != nil || feed == nil {
+					continue // Feed doesn't exist yet or error
+				}
 				
-				// Associate feeds with this tag
-				for _, feedURL := range feedURLs {
-					feed, err := m.db.GetFeedByURL(feedURL)
-					if err == nil && feed != nil {
-						// Associate tag with feed
-						m.db.AddFeedTag(feed.ID, tag.ID)
-					}
+				// Associate each tag with this feed
+				for _, tagName := range tagNames {
+					tagID := fmt.Sprintf("tag_%s", tagName)
+					m.db.AddFeedTag(feed.ID, tagID)
 				}
 			}
 		}
