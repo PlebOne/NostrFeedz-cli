@@ -6,7 +6,9 @@ NostrFeedz CLI is functional with core features implemented. This document track
 ## High Priority Tasks
 
 ### 1. Tags & Categories Validation
-- [ ] Test tags sync after NostrFeedz.com changes
+- [x] Created comprehensive validation checklist (TAGS_CATEGORIES_VALIDATION.md)
+- [x] Created test script (test-tags-categories.sh)
+- [ ] Execute validation tests with real NostrFeedz.com account
 - [ ] Verify categories display correctly
 - [ ] Ensure Uncategorized category works properly
 - [ ] Test multi-feed article aggregation for tags/categories
